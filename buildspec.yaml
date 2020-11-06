@@ -1,0 +1,55 @@
+version: 0.2
+
+env:
+  variables:
+    TAG: "latest"
+    REPOSITORY_URI: "038062473746.dkr.ecr.us-east-1.amazonaws.com/codebuild-backend:latest"
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto8
+      nodejs: 8
+    commands:
+      - echo Logging in to Amazon ECR...
+      - $(aws ecr get-login --no-include-email --region us-east-1)
+      - curl -sS -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.10.3/2018-07-26/bin/linux/amd64/aws-iam-authenticator
+      - curl -sS -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.15.11/2020-09-18/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl ./aws-iam-authenticator
+      - export PATH=$PWD/:$PATH
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 038062473746.dkr.ecr.us-east-1.amazonaws.com
+      - sed -i 's@CONTAINER_IMAGE@'"038062473746.dkr.ecr.us-east-1.amazonaws.com/codebuild-frontend:latest"'@' eks-deployment.yml
+      - sed -i 's@APPNAME@'"PetClinicBackendAWS"'@' eks-deployment.yml
+      - $(aws ecr get-login --no-include-email)
+      - export KUBECONFIG=$HOME/.kube/config
+      # - command
+  build:
+    commands:
+      - echo Build start on `date`
+      - mvn clean install -DskipTests
+      - mv target/petclinic.jar src/main/docker
+      - cd client && npm install && npm test && npm run build:prod
+      - docker build -t codebuild-frontend .
+      - docker tag codebuild-frontend:latest 038062473746.dkr.ecr.us-east-1.amazonaws.com/codebuild-frontend:latest
+      - cd ../src/main/docker
+      - docker build -t codebuild-backend .
+      - docker tag codebuild-backend:latest 038062473746.dkr.ecr.us-east-1.amazonaws.com/codebuild-backend:latest
+  post_build:
+    commands:
+      - echo Post Build start on `date`
+      - docker push 038062473746.dkr.ecr.us-east-1.amazonaws.com/codebuild-backend:latest
+      - docker push 038062473746.dkr.ecr.us-east-1.amazonaws.com/codebuild-frontend:latest
+      - CREDENTIALS=$(aws sts assume-role --role-arn arn:aws:iam::038062473746:role/CICDHackathon --role-session-name codebuild-kubectl --duration-seconds 900)
+      - export AWS_ACCESS_KEY_ID="$(echo ${CREDENTIALS} | jq -r '.Credentials.AccessKeyId')"
+      - export AWS_SECRET_ACCESS_KEY="$(echo ${CREDENTIALS} | jq -r '.Credentials.SecretAccessKey')"
+      - export AWS_SESSION_TOKEN="$(echo ${CREDENTIALS} | jq -r '.Credentials.SessionToken')"
+      - export AWS_EXPIRATION=$(echo ${CREDENTIALS} | jq -r '.Credentials.Expiration')
+      - aws eks update-kubeconfig --region us-east-1 --name basic-cluster --role-arn arn:aws:iam::038062473746:role/eksctl-basic-cluster-cluster-ServiceRole-1RCMEE2JORVL4
+      - kubectl get nodes
+      - kubectl apply -f eks-deployment.yml
+      - printf '[{"name":"eks-deployment","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > build.json
+
+artifacts:
+  files: build.json
